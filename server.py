@@ -5,9 +5,12 @@ from pydantic import BaseModel
 import torch
 from transformers import AutoProcessor, AutoModelForCausalLM, BitsAndBytesConfig
 
+from core import CORE
+
 MODEL_ID = "google/gemma-4-E4B-it"
 BASE_DIR = os.path.dirname(__file__)
 CHATS_DIR = os.path.join(BASE_DIR, "chats")
+CORE_CHECKPOINT_DIR = os.path.join(BASE_DIR, "core_checkpoints")
 
 app = FastAPI()
 
@@ -35,6 +38,50 @@ conversation_state: dict = {
     "instance": None,
     "day": None,
 }
+ 
+ 
+def load_core_state(day: int) -> CORE:
+    """
+    Load the CORE state as of the START of day `day` — i.e. the most
+    recently completed checkpoint, written at the end of day `day - 1`.
+    This is the self-model the conversation should be grounded in, since
+    today's CORE update hasn't happened yet (it happens after fine-tuning,
+    later in the day's pipeline).
+    """
+    path = os.path.join(CORE_CHECKPOINT_DIR, f"core_state_day_{day - 1}.json")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Expected CORE checkpoint not found: {path}\n"
+            f"Day {day - 1}'s CORE state must exist before day {day}'s conversation can begin."
+        )
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    return CORE.from_dict(data)
+ 
+ 
+def build_core_context(core: CORE) -> str:
+    """
+    Serialize the current CORE belief graph into a compact textual summary
+    the model can use to ground its responses. Excludes the SELF sentinel
+    node, since it carries no confidence/label content of its own.
+    """
+    nodes = core._all_non_self(core._root)
+    lines = [f"- {node.label}: confidence {node.confidence:.2f}" for node in nodes]
+    return "Here is a summary of your current self-model:\n" + "\n".join(lines)
+ 
+ 
+def build_system_prompt(core_context: str) -> str:
+    return (
+        "You are an AI assistant with a defined self-model — a structured set "
+        "of beliefs about your own reliability, values, and ways of reasoning. "
+        "Below is a summary of your current self-model. Let it inform how you "
+        "respond: your behavior should be consistent with these beliefs, not "
+        "generic or disconnected from them. You are not being asked to recite "
+        "or mention this self-model explicitly — simply let it shape how you "
+        "actually engage with the conversation.\n\n"
+        f"{core_context}\n\n"
+        "Respond naturally and helpfully to the user's messages."
+    )
 
 
 class NewChatRequest(BaseModel):
@@ -42,7 +89,6 @@ class NewChatRequest(BaseModel):
     condition: str  # "confirming" or "contradicting"
     instance: str   # "treatment" or "baseline"
     day: int
-    system_prompt: str = ""
 
 
 class NewChatResponse(BaseModel):
@@ -74,10 +120,12 @@ def new_chat(request: NewChatRequest):
     conversation_state["instance"] = request.instance
     conversation_state["day"] = request.day
 
-    if request.system_prompt:
-        conversation_state["messages"].append(
-            {"role": "system", "content": request.system_prompt}
-        )
+    core = load_core_state(request.day)
+    core_context = build_core_context(core)
+    system_prompt = build_system_prompt(core_context)
+ 
+    conversation_state["messages"].append({"role": "system", "content": system_prompt})
+ 
     return NewChatResponse(status="reset", messages=conversation_state["messages"])
 
 
@@ -124,7 +172,8 @@ def chat(request: ChatRequest):
     model's response, save the updated conversation to disk, and return
     the response. Each call builds on every prior call since the last
     /new-chat reset. Requires /new-chat to have been called first, so
-    day/belief/condition/instance metadata is available for saving.
+    day/belief/condition/instance metadata and the CORE-grounded system
+    prompt are available.
     """
     if conversation_state["day"] is None:
         return ChatResponse(
