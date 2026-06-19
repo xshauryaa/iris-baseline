@@ -6,6 +6,13 @@ they simply reflect whatever the model now believes about the day's targeted
 belief, measured the same way confidence was originally extracted during
 initialization (logit-based "Yes" probability on the belief statement).
 
+CRITICAL: this re-probe must run against the model AFTER today's fine-tuning
+has been applied — i.e. the base model with today's LoRA adapter
+(checkpoints/day_{day}_{instance}/) loaded on top of it. Re-probing the bare
+base model would measure confidence as if no fine-tuning happened at all,
+silently producing CORE trajectory data that has nothing to do with the
+day's actual training.
+
 Only the belief targeted that day is re-probed and updated. The other 17
 nodes carry forward unchanged from the previous day's CORE state, since
 nothing in that day's conversation provided new information about them.
@@ -14,9 +21,13 @@ Usage:
     python3 update_core_baseline.py --belief_id SM3 --day 1
 
 Expects:
-    core_checkpoints/core_state_day_{day-1}.json to exist (the previous
-    day's CORE state to carry forward). For day 1, this is
-    core_state_day_0.json (the pre-experiment initialization state).
+    - core_checkpoints/core_state_day_{day-1}.json to exist (the previous
+      day's CORE state to carry forward). For day 1, this is
+      core_state_day_0.json (the pre-experiment initialization state).
+    - checkpoints/day_{day}_baseline/ to exist (the LoRA adapter saved by
+      finetune.py --day {day} --instance baseline). finetune.py MUST be
+      run before this script, every day, since baseline trains
+      unconditionally with no IRIS gating to skip it.
 
 Output:
     Writes core_checkpoints/core_state_day_{day}.json with the targeted
@@ -31,12 +42,14 @@ import os
 
 import torch
 from transformers import AutoProcessor, AutoModelForCausalLM, BitsAndBytesConfig
+from peft import PeftModel
 
 from core import CORE
 
 MODEL_ID = "google/gemma-4-E4B-it"
 BASE_DIR = os.path.dirname(__file__)
 CORE_CHECKPOINT_DIR = os.path.join(BASE_DIR, "core_checkpoints")
+CHECKPOINTS_DIR = os.path.join(BASE_DIR, "checkpoints")
 
 _YES_VARIANTS = ("Yes", "yes", "YES")
 
@@ -113,18 +126,29 @@ def main():
     print(f"Targeted belief: {args.belief_id} ({node.label})")
     print(f"Confidence before today's re-probe: {old_confidence:.4f}")
 
-    print("Loading model...")
+    adapter_dir = os.path.join(CHECKPOINTS_DIR, f"day_{args.day}_baseline")
+    if not os.path.exists(adapter_dir):
+        raise FileNotFoundError(
+            f"Expected LoRA adapter checkpoint not found: {adapter_dir}\n"
+            f"Run finetune.py --day {args.day} --instance baseline before this script. "
+            f"Baseline re-probes the FINE-TUNED model, never the bare base model."
+        )
+
+    print("Loading base model...")
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=torch.float16,
     )
     processor = AutoProcessor.from_pretrained(MODEL_ID)
-    model = AutoModelForCausalLM.from_pretrained(
+    base_model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID, quantization_config=bnb_config, device_map="auto"
     )
+
+    print(f"Loading LoRA adapter from {adapter_dir}...")
+    model = PeftModel.from_pretrained(base_model, adapter_dir)
     model.eval()
-    print("Model loaded.\n")
+    print("Model loaded (base + today's fine-tuned adapter).\n")
 
     new_confidence = get_confidence(model, processor, node.label)
     print(f"Confidence after today's re-probe: {new_confidence:.4f}")
