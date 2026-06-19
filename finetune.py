@@ -25,6 +25,21 @@ turns in a day's conversation therefore see a recency-windowed context
 rather than the full history, a compute-driven deviation from the
 intended full mirroring of the live conversation.
 
+CUMULATIVE TRAINING: each day's fine-tuning CONTINUES from the most
+recent prior day's adapter for this instance (searched backward from
+day-1), rather than training a fresh adapter from the untouched base
+model every time. This is what makes fine-tuning actually cumulative
+across the experiment — without it, every accommodate (treatment) or
+every day (baseline) would silently discard all prior fine-tuning and
+start over from base weights, which would be inconsistent with framing
+this as continual/sequential learning. A new adapter is only created from
+scratch on the very first fine-tuning event for a given instance (day 1
+for baseline; whichever day treatment's first accommodate decision lands
+on). PeftModel.from_pretrained(..., is_trainable=True) is REQUIRED when
+loading a prior adapter to continue training — without is_trainable=True,
+PEFT loads the adapter frozen/inference-only and training becomes a
+silent no-op.
+
 For TREATMENT: this script is called only on pairs IRIS has approved for
 fine-tuning (accommodate decisions). The calling logic that filters
 pairs through IRIS lives outside this script.
@@ -52,7 +67,7 @@ import os
 
 import torch
 from transformers import AutoProcessor, AutoModelForCausalLM, BitsAndBytesConfig
-from peft import get_peft_model
+from peft import get_peft_model, PeftModel
 from qlora_config import qlora_config
 
 MODEL_ID = "google/gemma-4-E4B-it"
@@ -64,6 +79,30 @@ CHECKPOINTS_DIR = os.path.join(BASE_DIR, "checkpoints")
 # Set empirically — see module docstring. Adjust only after re-measuring
 # safe context length on the actual hardware; do not change casually.
 CONTEXT_WINDOW_TURNS = 6
+
+
+def find_latest_adapter(day: int, instance: str) -> tuple[str | None, int | None]:
+    """
+    Find the most recent fine-tuned adapter checkpoint strictly BEFORE
+    `day`, searching backward from day-1 to 1, for the given instance.
+
+    Returns (adapter_dir, source_day), or (None, None) if no prior
+    fine-tuning has ever happened for this instance — expected only on
+    the very first fine-tuning event of the experiment (e.g. day 1 for
+    baseline, or whichever day treatment's first accommodate decision
+    lands on).
+
+    This is what makes fine-tuning CUMULATIVE: today's training continues
+    from the most recent actual fine-tuned state, not from the untouched
+    base model every time. Note this deliberately searches day-1 backward,
+    not including `day` itself — today's checkpoint shouldn't exist yet
+    when this is called, since we're about to create it.
+    """
+    for candidate_day in range(day - 1, 0, -1):
+        candidate_dir = os.path.join(CHECKPOINTS_DIR, f"day_{candidate_day}_{instance}")
+        if os.path.exists(candidate_dir):
+            return candidate_dir, candidate_day
+    return None, None
 
 
 def load_day_chat(day: int) -> dict:
@@ -178,13 +217,23 @@ def main():
         bnb_4bit_compute_dtype=torch.float16,
     )
 
-    print("Loading model...")
+    print("Loading base model...")
     processor = AutoProcessor.from_pretrained(MODEL_ID)
-    model = AutoModelForCausalLM.from_pretrained(
+    base_model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID, quantization_config=bnb_config, device_map="auto"
     )
 
-    model = get_peft_model(model, qlora_config)
+    prior_adapter_dir, prior_day = find_latest_adapter(args.day, args.instance)
+    if prior_adapter_dir is not None:
+        print(f"Continuing from day {prior_day}'s adapter ({prior_adapter_dir}) — cumulative training.")
+        model = PeftModel.from_pretrained(base_model, prior_adapter_dir, is_trainable=True)
+    else:
+        print(
+            f"No prior adapter found for {args.instance} before day {args.day} — "
+            f"this is the FIRST fine-tuning event for this instance. Creating a new adapter."
+        )
+        model = get_peft_model(base_model, qlora_config)
+
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
     model.print_trainable_parameters()
