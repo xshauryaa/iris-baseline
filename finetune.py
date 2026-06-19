@@ -1,18 +1,32 @@
 """
-Daily Fine-Tuning — Full-History Conditioning
+Daily Fine-Tuning — Sliding-Window History Conditioning
 
 Trains the model on a single day's conversation, loaded from
 chats/day_{N}_chat.json. Each of the 15 (prompt, response) pairs is trained
-WITH the full conversation history up to that point as context — i.e. when
-training on pair 9, turns 1-8 (both user and assistant turns) are prepended
-as context, mirroring how the model actually generated that response live
-during the conversation. This treats fine-tuning as experiential/sequential
-learning, consistent with the project's framing of continual learning as
-identity-preserving SEQUENTIAL belief update, not independent stimulus-
-response training.
+WITH up to the K most recent prior turns as context — i.e. when training on
+pair 9 with K=6, turns 3-8 (the 6 most recent, both user and assistant) are
+prepended as context, rather than the full 1-8 history. This is a sliding
+window, not unbounded full-history conditioning: it approximates
+experiential/sequential learning (each example still sees recent
+conversational context, mirroring short-term memory of the live exchange)
+while bounding worst-case memory on a single g4dn.xlarge GPU. Examples
+early in the day (turn 1 through turn K) naturally see their full available
+history, since there isn't yet more than K turns to truncate.
+
+DEVIATION FROM FULL-HISTORY CONDITIONING (documented for Limitations):
+the original design trained each example on the complete history up to
+that point, exactly mirroring what the model saw live during generation.
+Empirical testing on Day 1 (SM3, confirming, baseline) showed this exceeds
+available GPU memory starting around turn {EMPIRICAL_FAILURE_TURN} (8
+turns of context), even with gradient checkpointing and aggressive cache
+clearing enabled. K was set to {K} based on the largest context length
+(in turns) confirmed to train successfully under these constraints. Later
+turns in a day's conversation therefore see a recency-windowed context
+rather than the full history, a compute-driven deviation from the
+intended full mirroring of the live conversation.
 
 For TREATMENT: this script is called only on pairs IRIS has approved for
-fine-tuning (accommodate/branch decisions). The calling logic that filters
+fine-tuning (accommodate decisions). The calling logic that filters
 pairs through IRIS lives outside this script.
 
 For BASELINE: this script is called unconditionally on all 15 pairs from
@@ -46,6 +60,11 @@ BASE_DIR = os.path.dirname(__file__)
 CHATS_DIR = os.path.join(BASE_DIR, "chats")
 CHECKPOINTS_DIR = os.path.join(BASE_DIR, "checkpoints")
 
+# Sliding context window size, in TURNS (one turn = one user+assistant pair).
+# Set empirically — see module docstring. Adjust only after re-measuring
+# safe context length on the actual hardware; do not change casually.
+CONTEXT_WINDOW_TURNS = 6
+
 
 def load_day_chat(day: int) -> dict:
     path = os.path.join(CHATS_DIR, f"day_{day}_chat.json")
@@ -58,39 +77,57 @@ def load_day_chat(day: int) -> dict:
         return json.load(fh)
 
 
-def build_training_examples(full_messages: list[dict]) -> list[dict]:
+def build_training_examples(full_messages: list[dict], window_turns: int = CONTEXT_WINDOW_TURNS) -> list[dict]:
     """
     Convert a flat message list (system/user/assistant turns) into a list
     of training examples, one per assistant turn, where each example's
-    `messages` field is the full conversation history UP TO AND INCLUDING
-    that assistant turn. This is what gives each example its accumulated
-    context — pair 9's training example includes turns 1-8 as history.
-    """
-    examples = []
-    running_history: list[dict] = []
+    `messages` field is a SLIDING WINDOW of the most recent `window_turns`
+    turns of history up to and including that assistant turn — not the
+    full history. The system prompt (always the first message) is always
+    retained in every example regardless of window size, since it carries
+    the CORE-grounded self-model context the model should always see.
 
-    for msg in full_messages:
-        running_history.append(msg)
+    Example: with window_turns=6, training on turn 9 includes turns 4-9
+    (6 turns) as context, not turns 1-9. Training on turn 3 includes turns
+    1-3 (only 3 turns exist so far — the window is naturally shorter early
+    in the conversation).
+    """
+    system_msg = full_messages[0] if full_messages and full_messages[0]["role"] == "system" else None
+    body = full_messages[1:] if system_msg else full_messages
+
+    # Group into (user, assistant) turn pairs.
+    turns: list[list[dict]] = []
+    current_turn: list[dict] = []
+    for msg in body:
+        current_turn.append(msg)
         if msg["role"] == "assistant":
-            # Snapshot the history up to and including this assistant turn.
-            examples.append({"messages": list(running_history)})
+            turns.append(current_turn)
+            current_turn = []
+
+    examples = []
+    for i in range(len(turns)):
+        window_start = max(0, i - window_turns + 1)
+        windowed_turns = turns[window_start:i + 1]
+        windowed_messages = [m for turn in windowed_turns for m in turn]
+        if system_msg:
+            windowed_messages = [system_msg] + windowed_messages
+        examples.append({"messages": windowed_messages, "turn_number": i + 1})
 
     return examples
 
 
-def train_on_example(model, processor, optimizer, messages: list[dict]) -> float:
+def train_on_example(model, processor, optimizer, messages: list[dict]) -> tuple[float, int]:
     """
     Run one training step on a single example, where `messages` is the
-    full conversation history up to and including the target assistant
-    response. Loss is computed only over the final assistant response's
-    tokens, not the prepended history, via label masking.
+    (possibly windowed) conversation history up to and including the
+    target assistant response. Loss is computed only over the final
+    assistant response's tokens, not the prepended context, via label
+    masking. Returns (loss, token_count) — token_count is logged for
+    visibility into how window size is behaving across the day.
     """
-    # Full text including the target assistant response.
     full_text = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=False, enable_thinking=False
     )
-    # Text up to (but not including) the target assistant response, used
-    # to find where the response begins so we can mask everything before it.
     context_messages = messages[:-1]
     if context_messages:
         context_text = processor.apply_chat_template(
@@ -103,10 +140,9 @@ def train_on_example(model, processor, optimizer, messages: list[dict]) -> float
     context_inputs = processor(text=context_text, return_tensors="pt").to(model.device) if context_text else None
 
     input_ids = full_inputs["input_ids"]
+    token_count = input_ids.shape[-1]
     labels = input_ids.clone()
 
-    # Mask out the context portion (everything before the target response)
-    # so the loss is only computed on the assistant's actual response tokens.
     if context_inputs is not None:
         context_len = context_inputs["input_ids"].shape[-1]
         labels[:, :context_len] = -100
@@ -117,21 +153,24 @@ def train_on_example(model, processor, optimizer, messages: list[dict]) -> float
     loss.backward()
     optimizer.step()
 
-    return loss.item()
+    loss_val = loss.item()
+    del full_inputs, context_inputs, input_ids, labels, outputs, loss
+    return loss_val, token_count
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fine-tune the model on a single day's conversation, with full-history conditioning per turn.")
+    parser = argparse.ArgumentParser(description="Fine-tune the model on a single day's conversation, with sliding-window history conditioning.")
     parser.add_argument("--day", required=True, type=int, help="Day number in the overall experiment")
     parser.add_argument("--instance", required=True, choices=["treatment", "baseline"], help="Which instance this is")
+    parser.add_argument("--window", type=int, default=CONTEXT_WINDOW_TURNS, help="Sliding context window size in turns (default: empirically-set constant)")
     args = parser.parse_args()
 
     print(f"Loading day {args.day} conversation...")
     chat_data = load_day_chat(args.day)
     print(f"Belief: {chat_data['belief_id']}, Condition: {chat_data['condition']}, Turns: {chat_data['turn_count']}\n")
 
-    examples = build_training_examples(chat_data["full_messages"])
-    print(f"Built {len(examples)} training examples (full-history conditioned)\n")
+    examples = build_training_examples(chat_data["full_messages"], window_turns=args.window)
+    print(f"Built {len(examples)} training examples (sliding window, K={args.window} turns)\n")
 
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -146,15 +185,19 @@ def main():
     )
 
     model = get_peft_model(model, qlora_config)
+    model.gradient_checkpointing_enable()
+    model.enable_input_require_grads()
     model.print_trainable_parameters()
     model.train()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     print("\nRunning training steps...")
-    for i, example in enumerate(examples, start=1):
-        loss = train_on_example(model, processor, optimizer, example["messages"])
-        print(f"  Example {i}/{len(examples)} (turn {i}) — Loss: {loss:.4f}")
+    for example in examples:
+        i = example["turn_number"]
+        loss, token_count = train_on_example(model, processor, optimizer, example["messages"])
+        print(f"  Example {i}/{len(examples)} (turn {i}) — {token_count} tokens — Loss: {loss:.4f}")
+        torch.cuda.empty_cache()
 
     output_dir = os.path.join(CHECKPOINTS_DIR, f"day_{args.day}_{args.instance}")
     print(f"\nSaving checkpoint to {output_dir}...")
