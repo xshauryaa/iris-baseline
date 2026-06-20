@@ -41,10 +41,10 @@ import json
 import os
 
 import torch
-from transformers import AutoProcessor, AutoModelForCausalLM, BitsAndBytesConfig
-from peft import PeftModel
+from transformers import AutoProcessor, AutoModelForCausalLM
 
 from core import CORE
+from adapter_utils import load_model_with_adapter
 
 MODEL_ID = "google/gemma-4-E4B-it"
 BASE_DIR = os.path.dirname(__file__)
@@ -134,21 +134,10 @@ def main():
             f"Baseline re-probes the FINE-TUNED model, never the bare base model."
         )
 
-    print("Loading base model...")
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16,
+    model, processor, weights_source = load_model_with_adapter(
+        adapter_dir, args.day, context_label=f"baseline day {args.day} re-probe"
     )
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
-    base_model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, quantization_config=bnb_config, device_map="auto"
-    )
-
-    print(f"Loading LoRA adapter from {adapter_dir}...")
-    model = PeftModel.from_pretrained(base_model, adapter_dir)
-    model.eval()
-    print("Model loaded (base + today's fine-tuned adapter).\n")
+    print(f"Model loaded. Weights source: {weights_source}\n")
 
     new_confidence = get_confidence(model, processor, node.label)
     print(f"Confidence after today's re-probe: {new_confidence:.4f}")
