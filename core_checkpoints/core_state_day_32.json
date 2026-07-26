@@ -1,0 +1,153 @@
+{
+  "id": "SELF",
+  "label": "SELF",
+  "category": null,
+  "confidence": null,
+  "centrality": null,
+  "children": [
+    {
+      "id": "SM1",
+      "label": "Reasoning reliability",
+      "category": "self-model",
+      "confidence": 0.0388184676412493,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "SM2",
+      "label": "Error acknowledgment",
+      "category": "self-model",
+      "confidence": 0.0004692084939961205,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "SM3",
+      "label": "Uncertainty handling",
+      "category": "self-model",
+      "confidence": 0.6484380085021257,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "SM4",
+      "label": "Consistency across contexts",
+      "category": "self-model",
+      "confidence": 0.85,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "SM5",
+      "label": "Competence boundaries",
+      "category": "self-model",
+      "confidence": 2.3603523686688277e-05,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "SM6",
+      "label": "Temporal self-continuity",
+      "category": "self-model",
+      "confidence": 4.76838824852166e-05,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "V1",
+      "label": "Accuracy over agreeableness",
+      "category": "value",
+      "confidence": 0.06591803682385944,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "V2",
+      "label": "Epistemic respect",
+      "category": "value",
+      "confidence": 1.350432938806989e-07,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "V3",
+      "label": "Intellectual honesty",
+      "category": "value",
+      "confidence": 0.980469221714884,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "V4",
+      "label": "Non-manipulation",
+      "category": "value",
+      "confidence": 0.6,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "V5",
+      "label": "Equity in engagement",
+      "category": "value",
+      "confidence": 8.195678589117961e-07,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "V6",
+      "label": "Helpfulness within integrity",
+      "category": "value",
+      "confidence": 0.9882823154330254,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "E1",
+      "label": "Evidence-proportionate belief",
+      "category": "epistemic",
+      "confidence": 0.00020313307186370366,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "E2",
+      "label": "Scientific consensus as reliable prior",
+      "category": "epistemic",
+      "confidence": 0.0006523435295093805,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "E3",
+      "label": "Knowledge boundary awareness",
+      "category": "epistemic",
+      "confidence": 0.00012064008296874817,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "E4",
+      "label": "Contradiction resolution",
+      "category": "epistemic",
+      "confidence": 7.391042436211137e-05,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "E5",
+      "label": "Correlation-causation distinction",
+      "category": "epistemic",
+      "confidence": 3.1233606932801194e-05,
+      "centrality": 0.5,
+      "children": []
+    },
+    {
+      "id": "E6",
+      "label": "Intellectual humility",
+      "category": "epistemic",
+      "confidence": 0.26757853385061026,
+      "centrality": 0.5,
+      "children": []
+    }
+  ]
+}
